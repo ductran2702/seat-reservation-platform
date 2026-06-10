@@ -140,12 +140,10 @@ Hold lifecycle (race-safe, done in a transaction):
       API client. Build + proxy + end-to-end verified. (The standalone
       `/checkout` + `/confirmation` routes were replaced by this inline flow; the
       `/intent` + `/confirm` API endpoints are unchanged.)
-- [~] **Phase 5 — Polish:** automated concurrency test added (`npm test`,
-      Vitest) — *two concurrent holds on one seat → exactly one `201` + one
-      `409`, and the DB holds exactly one active reservation*; server bootstrap
-      refactored into `createApp()` (`src/app.ts`) so it is testable.
-      Remaining: README run instructions, broader edge-case coverage, final
-      DECISIONS.md review.
+- [x] **Phase 5 — Polish:** testable `createApp()` bootstrap, **README.md**
+      (setup/env/scripts), Vitest integration suite (`npm test` — concurrency
+      race + payment fail/timeout, expired hold, cancel, hold limit, confirmed
+      seats excluded from limit), and final **DECISIONS.md** review.
 
 ## 8. Run commands (target)
 

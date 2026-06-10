@@ -16,10 +16,12 @@ deliberate trade-offs made under a ~2-hour budget.
 cp .env.example .env && npm install && npm run db:up
 npm run db:push   # prisma db push + partial unique index + seed (3 seats, demo user)
 npm run dev       # Express API + Vite/React client
+npm test          # automated integration tests (requires db:up)
 ```
 
-> `npm run db:up` starts Postgres in Docker. Demo login is seeded and printed by
-> the seed script.
+> `npm run db:up` starts Postgres in Docker (host port **5434**). Demo login is
+> seeded and printed by the seed script. See `README.md` for full setup and test
+> instructions.
 
 ## 3. Architecture
 
@@ -32,6 +34,9 @@ npm run dev       # Express API + Vite/React client
   rotated in the DB so they can be revoked.
 - **Booking core:** a reservation row *is* a hold with an expiry; a **partial
   unique index** enforces "one active reservation per seat" at the database level.
+- **UI flow:** single seats page — multi-select (≤2) → **Hold** → inline payment
+  section (shared countdown, **Pay all** / failure / timeout, one **Cancel** for
+  all holds). Confirmed seats do not count toward the hold limit.
 
 ```
 React (Vite :5174) ──/api proxy──▶ Express (:4001) ──Prisma──▶ Postgres (:5434, Docker)
@@ -59,11 +64,12 @@ row per seat — the database, not application code, is the arbiter. Creating a
 hold runs in a transaction that (1) lazily expires stale holds
 (`status='HELD' AND holdExpiresAt < now()` → `EXPIRED`), (2) returns the existing
 reservation if the caller already holds that seat (idempotent), (3) enforces a
-per-user active limit (`MAX_ACTIVE_RESERVATIONS_PER_USER`, default 2), then
-(4) inserts the new hold; a unique-violation (Prisma `P2002`) means another
+per-user **hold** limit (`MAX_ACTIVE_RESERVATIONS_PER_USER`, default 2) by
+counting only `status='HELD'` rows — **CONFIRMED reservations do not count**,
+then (4) inserts the new hold; a unique-violation (Prisma `P2002`) means another
 request already holds the seat, returned as `409 Conflict`. The seat-level
-guarantee is hard (DB-enforced); the per-user limit is best-effort (a count, not
-lock-serialized). Payment confirmation re-checks ownership and hold-expiry inside
+guarantee is hard (DB-enforced); the per-user hold limit is best-effort (a count,
+not lock-serialized). Payment confirmation re-checks ownership and hold-expiry inside
 a transaction before flipping `HELD → CONFIRMED` (so an expired hold can never be
 paid into a confirmation); `fail` releases the seat (`FAILED`), `timeout` leaves
 it `HELD` and retryable until expiry. A user can also voluntarily release a hold
@@ -94,30 +100,33 @@ via `DELETE /api/reservations/:id` (→ `CANCELLED`).
 - **No CSRF double-submit token** — relying on `SameSite=Strict` for this scope.
 - **No realtime seat updates** (websockets/SSE) — client refetches availability.
 - **No CSP / Helmet hardening, no audit logging, no observability/metrics.**
-- **Minimal automated tests** — one automated integration test covers the
-  critical concurrency invariant (`npm test`); the remaining failure paths are
-  exercised manually (see §8).
+- **Limited automated test coverage** — `npm test` runs Vitest integration tests
+  for the concurrency race and key failure paths (payment fail/timeout, expired
+  hold, cancel, hold limit); UI and auth edge cases remain manual (see §8).
 - **No production deployment / CI** — local-first per the assessment.
 
 ## 8. How to test failure paths
 
-The payment flow is two-step: `POST /api/payments/:id/intent` (returns a mock
-`checkoutUrl`) then `POST /api/payments/:id/confirm?outcome=...` (the provider
-callback).
+The payment API is two-step (`POST /api/payments/:id/intent` then
+`POST /api/payments/:id/confirm?outcome=...`); the SPA calls both inline from
+the seats page (no separate checkout route).
 
-- **Payment failure:** confirm with `?outcome=fail` → payment `FAILED`,
-  reservation `FAILED`, seat returns to available.
-- **Payment timeout:** `?outcome=timeout` → payment `TIMEOUT` returned
-  immediately; reservation stays `HELD` and is retryable (re-confirm with
-  `?outcome=success` confirms it).
-- **Expired hold:** create a hold, wait past `HOLD_TTL` (configurable via env;
-  set it low to test), then refetch — the hold shows `EXPIRED` and the seat is
-  bookable again. The next reservation attempt lazily expires the stale hold, and
-  `intent`/`confirm` on an expired hold return `409 hold_expired`.
-- **Double-booking race (automated):** `npm test` (Vitest) mounts the app on an
-  ephemeral port, registers two users, and fires two concurrent
-  `POST /api/reservations` for the same seat — asserting exactly one `201` and
-  one `409 seat_unavailable`, and that the DB ends with exactly one active
-  reservation for that seat. (Requires `npm run db:up`.)
-- **Voluntary cancel:** `DELETE /api/reservations/:id` on your own `HELD` seat
-  frees it immediately (`CANCELLED`); confirmed seats return `409`.
+### Automated (`npm test`, requires `npm run db:up`)
+
+| Test | Asserts |
+| ---- | ------- |
+| Concurrent holds on one seat | Exactly one `201` + one `409 seat_unavailable`; DB has one active row |
+| Payment `?outcome=fail` | Reservation `FAILED`; seat bookable by another user |
+| Payment `?outcome=timeout` then `success` | Stays `HELD` after timeout; retry confirms |
+| Expired hold + intent | `409 hold_expired` |
+| `DELETE` held reservation | `CANCELLED`; seat freed |
+| Confirmed + two new holds | CONFIRMED does not count toward hold limit |
+| Third hold same user | `409 reservation_limit` |
+
+### Manual (UI)
+
+- **Hold expiry:** wait past `HOLD_TTL_SECONDS` (default **30s** in `.env`) —
+  payment section disappears, seat returns to available.
+- **Pay all success / failure / timeout:** use the inline payment buttons on the
+  seats page.
+- **Cancel all holds:** single **Cancel** button in the payment section.
