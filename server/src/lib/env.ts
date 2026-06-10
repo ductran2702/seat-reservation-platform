@@ -17,6 +17,9 @@ export const env = {
   refreshTokenTtlDays: Number(process.env.REFRESH_TOKEN_TTL_DAYS ?? 90),
   holdTtlSeconds: Number(process.env.HOLD_TTL_SECONDS ?? 300),
   seatPriceCents: Number(process.env.SEAT_PRICE_CENTS ?? 2500),
+  maxActiveReservationsPerUser: Number(
+    process.env.MAX_ACTIVE_RESERVATIONS_PER_USER ?? 2,
+  ),
 };
 
 export const ACCESS_COOKIE_MAX_AGE_MS = 15 * 60 * 1000;

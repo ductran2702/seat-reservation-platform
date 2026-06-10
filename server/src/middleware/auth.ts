@@ -20,3 +20,21 @@ export function requireAuth(
     res.status(401).json({ error: "invalid_token" });
   }
 }
+
+// Attaches req.userId when a valid access cookie is present, but never blocks.
+// Used by public endpoints that personalize their response when logged in.
+export function optionalAuth(
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+): void {
+  const token = req.cookies?.[ACCESS_COOKIE];
+  if (token) {
+    try {
+      req.userId = verifyAccessToken(token).sub;
+    } catch {
+      // Ignore invalid/expired tokens for optional auth.
+    }
+  }
+  next();
+}

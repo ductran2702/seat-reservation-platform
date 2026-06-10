@@ -54,12 +54,15 @@ A seat reservation *is* the hold: creating a reservation inserts a `HELD` row
 with `holdExpiresAt = now() + HOLD_TTL`. A **partial unique index** on
 `("seatId") WHERE status IN ('HELD','CONFIRMED')` guarantees at most one active
 row per seat — the database, not application code, is the arbiter. Creating a
-hold runs in a transaction that first lazily expires stale holds
-(`status='HELD' AND holdExpiresAt < now()` → `EXPIRED`), then inserts the new
-hold; a unique-violation (Prisma `P2002`) means another request already holds
-the seat, returned as `409 Conflict`. Payment success flips `HELD → CONFIRMED`
-in a transaction; failure/timeout leaves the seat free (immediately, or after the
-hold expires).
+hold runs in a transaction that (1) lazily expires stale holds
+(`status='HELD' AND holdExpiresAt < now()` → `EXPIRED`), (2) returns the existing
+reservation if the caller already holds that seat (idempotent), (3) enforces a
+per-user active limit (`MAX_ACTIVE_RESERVATIONS_PER_USER`, default 2), then
+(4) inserts the new hold; a unique-violation (Prisma `P2002`) means another
+request already holds the seat, returned as `409 Conflict`. The seat-level
+guarantee is hard (DB-enforced); the per-user limit is best-effort (a count, not
+lock-serialized). Payment success flips `HELD → CONFIRMED` in a transaction;
+failure/timeout leaves the seat free (immediately, or after the hold expires).
 
 ## 6. Security notes
 
@@ -79,6 +82,9 @@ hold expires).
   keys, or signature verification).
 - **No background job** to expire holds — expiry is **lazy** (computed on read /
   on next hold attempt) instead of a scheduled sweeper.
+- **Per-user reservation limit is best-effort** — enforced via a count inside the
+  hold transaction, not a lock; under extreme concurrency a user could briefly
+  exceed it. The *seat* double-booking guarantee is the hard, DB-enforced one.
 - **No email verification, password reset, or MFA.**
 - **No CSRF double-submit token** — relying on `SameSite=Strict` for this scope.
 - **No realtime seat updates** (websockets/SSE) — client refetches availability.

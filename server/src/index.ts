@@ -2,6 +2,8 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import { env } from "./lib/env.js";
 import { authRouter } from "./routes/auth.js";
+import { seatsRouter } from "./routes/seats.js";
+import { reservationsRouter } from "./routes/reservations.js";
 import { errorHandler, notFound } from "./middleware/errors.js";
 
 const app = express();
@@ -14,8 +16,10 @@ app.get("/api/health", (_req, res) => {
 });
 
 app.use("/api/auth", authRouter);
+app.use("/api/seats", seatsRouter);
+app.use("/api/reservations", reservationsRouter);
 
-// Seats, reservations, and payment routes are added in later phases.
+// Payment routes are added in the next phase.
 
 app.use(notFound);
 app.use(errorHandler);

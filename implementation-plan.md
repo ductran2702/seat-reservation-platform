@@ -72,8 +72,10 @@ Prisma `db push` cannot express filtered indexes, so `npm run db:push` applies
 
 Hold lifecycle (race-safe, done in a transaction):
 1. Lazily expire stale holds: `UPDATE ... SET status='EXPIRED' WHERE status='HELD' AND holdExpiresAt < now()`.
-2. Insert new `HELD` row with `holdExpiresAt = now() + HOLD_TTL`.
-3. If the partial unique index throws (P2002), the seat is already taken → return `409 Conflict`.
+2. Idempotency: if the caller already actively holds/owns this seat, return that reservation.
+3. Enforce the per-user active limit (`MAX_ACTIVE_RESERVATIONS_PER_USER`, default 2) — best-effort (not lock-serialized).
+4. Insert new `HELD` row with `holdExpiresAt = now() + HOLD_TTL`.
+5. If the partial unique index throws (P2002), the seat is already taken → return `409 Conflict`.
 
 ## 5. API surface
 
@@ -84,9 +86,9 @@ Hold lifecycle (race-safe, done in a transaction):
 | POST   | `/api/auth/refresh`          | Rotate refresh token, issue new access cookie        |
 | POST   | `/api/auth/logout`           | Revoke refresh token, clear cookies                  |
 | GET    | `/api/auth/me`               | Current user                                         |
-| GET    | `/api/seats`                 | List seats + live availability                       |
-| POST   | `/api/reservations`          | Create a hold on a seat (auth)                       |
-| GET    | `/api/reservations/:id`      | Hold/reservation status (auth)                       |
+| GET    | `/api/seats`                 | List seats + live availability (optional auth → `mine`) |
+| POST   | `/api/reservations`          | Hold a seat (auth; idempotent, limit-checked, race-safe) |
+| GET    | `/api/reservations/:id`      | Hold/reservation status, owner-only (auth)           |
 | POST   | `/api/payments/:reservationId` | Start mock payment; honors `?outcome=`             |
 
 ## 6. Mock payment flow
@@ -104,8 +106,10 @@ Hold lifecycle (race-safe, done in a transaction):
       `db:push` verified.
 - [ ] **Phase 1 — Auth:** password hashing, JWT issue/verify, cookie helpers,
       register/login/refresh/logout/me, auth middleware, auth rate limiter.
-- [ ] **Phase 2 — Seats & holds:** `GET /seats`, `POST /reservations`
-      (transactional hold + lazy expiry + P2002 → 409), status endpoint.
+- [x] **Phase 2 — Seats & holds:** `GET /seats` (optional-auth availability +
+      `mine`), `POST /reservations` (transactional sweep + idempotent re-hold +
+      per-user limit + P2002 → 409), owner-only status endpoint. Verified incl.
+      cross-user conflict, limit, lazy expiry, and a double-booking race.
 - [ ] **Phase 3 — Payment:** mock payment route with outcome simulation,
       transactional confirmation.
 - [ ] **Phase 4 — Frontend:** login page, seat picker (live availability),
