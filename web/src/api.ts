@@ -118,6 +118,9 @@ export const api = {
   createReservation: (seatId: string) =>
     request<{ reservation: ReservationView }>("/api/reservations", {
       method: "POST",
+      // Client-generated idempotency key: retries of this hold attempt
+      // (double-click, network blip) map to the same reservation server-side.
+      headers: { "Idempotency-Key": crypto.randomUUID() },
       body: JSON.stringify({ seatId }),
     }),
   getReservation: (id: string) =>

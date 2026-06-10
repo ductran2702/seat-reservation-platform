@@ -14,10 +14,18 @@ const createSchema = z.object({
   seatId: z.string().min(1),
 });
 
+// Client-generated key (UUID) sent in the Idempotency-Key header so retried
+// POSTs (double-click, network blip) return the original reservation instead
+// of creating a duplicate. Enforced by a UNIQUE constraint in the DB.
+const idempotencyKeySchema = z.string().uuid().optional();
+
 reservationsRouter.post(
   "/",
   asyncHandler(async (req, res) => {
     const { seatId } = createSchema.parse(req.body);
+    const idempotencyKey = idempotencyKeySchema.parse(
+      req.get("Idempotency-Key") ?? undefined,
+    );
     const userId = req.userId!;
     const now = new Date();
 
@@ -25,6 +33,8 @@ reservationsRouter.post(
       const reservation = await prisma.$transaction(async (tx) => {
         // Lazily expire stale holds so counts and the partial unique index
         // reflect reality before we attempt a new hold.
+        // TODO(prod): move expiry to a background sweeper (or Redis ZSET with
+        // native TTL) instead of lazy-on-write.
         await tx.reservation.updateMany({
           where: { status: "HELD", holdExpiresAt: { lt: now } },
           data: { status: "EXPIRED" },
@@ -33,6 +43,21 @@ reservationsRouter.post(
         const seat = await tx.seat.findUnique({ where: { id: seatId } });
         if (!seat) {
           throw new ApiError(404, "seat_not_found");
+        }
+
+        // Idempotent replay: the same Idempotency-Key always returns the
+        // reservation created by the first attempt.
+        if (idempotencyKey) {
+          const replay = await tx.reservation.findUnique({
+            where: { idempotencyKey },
+            include: { seat: true, payment: true },
+          });
+          if (replay) {
+            if (replay.userId !== userId) {
+              throw new ApiError(409, "idempotency_key_conflict");
+            }
+            return replay;
+          }
         }
 
         // Idempotent: if this user already actively holds/owns this seat,
@@ -63,6 +88,7 @@ reservationsRouter.post(
           data: {
             seatId,
             userId,
+            idempotencyKey,
             status: "HELD",
             holdExpiresAt: new Date(now.getTime() + env.holdTtlSeconds * 1000),
           },
@@ -72,11 +98,29 @@ reservationsRouter.post(
 
       res.status(201).json({ reservation: toReservationView(reservation) });
     } catch (err) {
-      // Partial unique index violation => another request holds this seat.
       if (
         err instanceof Prisma.PrismaClientKnownRequestError &&
         err.code === "P2002"
       ) {
+        const target = Array.isArray(err.meta?.target)
+          ? err.meta.target.join(",")
+          : String(err.meta?.target ?? "");
+
+        // Race on the SAME idempotency key (concurrent retries): return the
+        // reservation the winning request created.
+        if (idempotencyKey && target.includes("idempotencyKey")) {
+          const winner = await prisma.reservation.findUnique({
+            where: { idempotencyKey },
+            include: { seat: true, payment: true },
+          });
+          if (winner && winner.userId === userId) {
+            res.status(200).json({ reservation: toReservationView(winner) });
+            return;
+          }
+          throw new ApiError(409, "idempotency_key_conflict");
+        }
+
+        // Partial unique index violation => another request holds this seat.
         throw new ApiError(409, "seat_unavailable", "Seat is no longer available");
       }
       throw err;
