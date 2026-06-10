@@ -1,0 +1,27 @@
+{
+  "name": "seat-reservation-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Public seat reservation platform with mock payment and hold-based concurrency control",
+  "workspaces": [
+    "server"
+  ],
+  "scripts": {
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:logs": "docker compose logs -f db",
+    "db:push": "npm run db:push -w server",
+    "db:seed": "npm run db:seed -w server",
+    "db:studio": "npm run db:studio -w server",
+    "dev": "npm run dev -w server"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "allowScripts": {
+    "@prisma/client@5.22.0": true,
+    "@prisma/engines@5.22.0": true,
+    "prisma@5.22.0": true,
+    "esbuild@0.28.0": true
+  }
+}

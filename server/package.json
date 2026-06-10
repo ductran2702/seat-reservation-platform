@@ -1,0 +1,39 @@
+{
+  "name": "@seat/server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "dotenv -e ../.env -- tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "dotenv -e ../.env -- node dist/index.js",
+    "prisma": "dotenv -e ../.env -- prisma",
+    "db:push": "dotenv -e ../.env -- prisma db push && dotenv -e ../.env -- prisma db execute --file ./prisma/partial-index.sql --schema ./prisma/schema.prisma && npm run db:seed",
+    "db:seed": "dotenv -e ../.env -- tsx prisma/seed.ts",
+    "db:studio": "dotenv -e ../.env -- prisma studio",
+    "generate": "dotenv -e ../.env -- prisma generate"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.4.1",
+    "jsonwebtoken": "^9.0.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cookie-parser": "^1.4.8",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^20.17.6",
+    "dotenv-cli": "^7.4.4",
+    "prisma": "^5.22.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
