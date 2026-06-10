@@ -12,7 +12,6 @@ export const env = {
   port: Number(process.env.PORT ?? 4001),
   webOrigin: process.env.WEB_ORIGIN ?? "http://localhost:5174",
   accessTokenSecret: required("ACCESS_TOKEN_SECRET"),
-  refreshTokenSecret: required("REFRESH_TOKEN_SECRET"),
   accessTokenTtl: process.env.ACCESS_TOKEN_TTL ?? "15m",
   refreshTokenTtlDays: Number(process.env.REFRESH_TOKEN_TTL_DAYS ?? 90),
   holdTtlSeconds: Number(process.env.HOLD_TTL_SECONDS ?? 30),

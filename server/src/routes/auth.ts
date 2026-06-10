@@ -5,10 +5,9 @@ import { z } from "zod";
 import { prisma } from "../lib/prisma.js";
 import { hashPassword, verifyPassword } from "../lib/password.js";
 import {
+  generateRefreshToken,
   hashToken,
   signAccessToken,
-  signRefreshToken,
-  verifyRefreshToken,
 } from "../lib/tokens.js";
 import {
   REFRESH_COOKIE,
@@ -54,14 +53,13 @@ function toPublicUser(user: {
   };
 }
 
-// Issues a fresh access token + a DB-tracked refresh token and sets cookies.
+// Issues a fresh access token + a DB-tracked opaque refresh token and sets
+// cookies. Only the SHA-256 hash of the refresh token is persisted.
 async function issueSession(res: Response, userId: string): Promise<void> {
-  const jti = crypto.randomUUID();
-  const refreshToken = signRefreshToken(userId, jti);
+  const refreshToken = generateRefreshToken();
   const accessToken = signAccessToken(userId);
   await prisma.refreshToken.create({
     data: {
-      id: jti,
       userId,
       tokenHash: hashToken(refreshToken),
       expiresAt: new Date(Date.now() + REFRESH_COOKIE_MAX_AGE_MS),
@@ -111,45 +109,59 @@ authRouter.post(
       throw new ApiError(401, "no_refresh_token");
     }
 
-    let payload;
-    try {
-      payload = verifyRefreshToken(token);
-    } catch {
-      clearAuthCookies(res);
-      throw new ApiError(401, "invalid_refresh_token");
-    }
-
     const record = await prisma.refreshToken.findUnique({
-      where: { id: payload.jti },
+      where: { tokenHash: hashToken(token) },
     });
-    const valid =
-      record &&
-      !record.revokedAt &&
-      record.expiresAt > new Date() &&
-      record.tokenHash === hashToken(token);
-    if (!valid) {
+    if (!record) {
       clearAuthCookies(res);
       throw new ApiError(401, "invalid_refresh_token");
     }
 
-    // Rotate: revoke the presented token and issue a new one atomically.
-    const newJti = crypto.randomUUID();
-    const newRefresh = signRefreshToken(payload.sub, newJti);
-    const newAccess = signAccessToken(payload.sub);
-    await prisma.$transaction([
-      prisma.refreshToken.update({
-        where: { id: payload.jti },
-        data: { revokedAt: new Date(), replacedById: newJti },
-      }),
-      prisma.refreshToken.create({
+    // Reuse detection: an already-rotated/revoked token being presented again
+    // is a theft signal — burn every active session for this user so a stolen
+    // cookie can't keep a session alive.
+    if (record.revokedAt) {
+      await prisma.refreshToken.updateMany({
+        where: { userId: record.userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      clearAuthCookies(res);
+      throw new ApiError(401, "refresh_token_reused");
+    }
+    if (record.expiresAt <= new Date()) {
+      clearAuthCookies(res);
+      throw new ApiError(401, "refresh_token_expired");
+    }
+
+    // Rotate atomically: CAS-revoke the presented token (guarded on
+    // revokedAt IS NULL) and issue the replacement in the SAME transaction.
+    // If two requests race with the same token, exactly one wins the CAS;
+    // the loser gets a 401 instead of a second valid token pair.
+    const newId = crypto.randomUUID();
+    const newRefresh = generateRefreshToken();
+    const newAccess = signAccessToken(record.userId);
+    const rotated = await prisma.$transaction(async (tx) => {
+      const revoked = await tx.refreshToken.updateMany({
+        where: { id: record.id, revokedAt: null },
+        data: { revokedAt: new Date(), replacedById: newId },
+      });
+      if (revoked.count === 0) {
+        return false;
+      }
+      await tx.refreshToken.create({
         data: {
-          id: newJti,
-          userId: payload.sub,
+          id: newId,
+          userId: record.userId,
           tokenHash: hashToken(newRefresh),
           expiresAt: new Date(Date.now() + REFRESH_COOKIE_MAX_AGE_MS),
         },
-      }),
-    ]);
+      });
+      return true;
+    });
+    if (!rotated) {
+      clearAuthCookies(res);
+      throw new ApiError(401, "invalid_refresh_token");
+    }
 
     setAuthCookies(res, newAccess, newRefresh);
     res.json({ ok: true });
@@ -161,15 +173,12 @@ authRouter.post(
   asyncHandler(async (req, res) => {
     const token = req.cookies?.[REFRESH_COOKIE] as string | undefined;
     if (token) {
-      try {
-        const payload = verifyRefreshToken(token);
-        await prisma.refreshToken.updateMany({
-          where: { id: payload.jti, revokedAt: null },
-          data: { revokedAt: new Date() },
-        });
-      } catch {
-        // Ignore invalid tokens on logout; we still clear cookies.
-      }
+      // Server-side revocation is mandatory: clearing the cookie alone would
+      // leave a stolen copy of the token usable until it expires.
+      await prisma.refreshToken.updateMany({
+        where: { tokenHash: hashToken(token), revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
     }
     clearAuthCookies(res);
     res.json({ ok: true });
