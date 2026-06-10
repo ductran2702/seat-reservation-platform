@@ -47,6 +47,8 @@ React (Vite :5174) ──/api proxy──▶ Express (:4001) ──Prisma──�
 | Hold-with-expiry + partial unique index | `SELECT ... FOR UPDATE`, optimistic version check | DB is the single source of truth for "one active row per seat"; survives races without app-level locking | Background sweeper job + Redis-backed hold TTL, websockets for live seat updates |
 | Two-step mock payment (intent → checkout URL → confirm callback) with `?outcome=` | Single synchronous endpoint; Stripe test mode | Mirrors a real redirect/callback flow and deterministically exercises success / fail / timeout without external deps | Real provider webhook + idempotency keys + signature verification |
 | Basic rate limit on auth only | Rate limit everything; none | Highest-value target (credential stuffing) within time budget | Distributed rate limiting (Redis), per-IP + per-account limits, lockout |
+| Vite/React SPA, plain CSS, React Router, native fetch + 3s polling | Next.js, Tailwind, TanStack Query | Few deps, fast to build, clearly demonstrates the flow; polling keeps seat availability + hold countdown live | Realtime via WebSocket/SSE, optimistic UI, component/e2e tests |
+| Single seats page: multi-select (≤2) → Hold → inline "Pay all" section | Per-seat checkout pages; per-seat payment outcomes | Matches the booking mental model (pick basket, then pay) and keeps the whole flow on one screen | Per-seat outcome control, cart persistence, seat map layout |
 
 ## 5. Concurrency model
 

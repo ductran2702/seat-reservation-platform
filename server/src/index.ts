@@ -16,6 +16,15 @@ app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+// Public client config (e.g. seat price for the payment summary).
+app.get("/api/config", (_req, res) => {
+  res.json({
+    seatPriceCents: env.seatPriceCents,
+    holdTtlSeconds: env.holdTtlSeconds,
+    maxActiveReservationsPerUser: env.maxActiveReservationsPerUser,
+  });
+});
+
 app.use("/api/auth", authRouter);
 app.use("/api/seats", seatsRouter);
 app.use("/api/reservations", reservationsRouter);

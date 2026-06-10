@@ -4,7 +4,8 @@
   "private": true,
   "description": "Public seat reservation platform with mock payment and hold-based concurrency control",
   "workspaces": [
-    "server"
+    "server",
+    "web"
   ],
   "scripts": {
     "db:up": "docker compose up -d",
@@ -13,7 +14,13 @@
     "db:push": "npm run db:push -w server",
     "db:seed": "npm run db:seed -w server",
     "db:studio": "npm run db:studio -w server",
-    "dev": "npm run dev -w server"
+    "dev": "concurrently -n api,web -c blue,green \"npm run dev -w server\" \"npm run dev -w web\"",
+    "dev:server": "npm run dev -w server",
+    "dev:web": "npm run dev -w web",
+    "build": "npm run build -w server && npm run build -w web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
   },
   "engines": {
     "node": ">=20"
@@ -22,6 +29,8 @@
     "@prisma/client@5.22.0": true,
     "@prisma/engines@5.22.0": true,
     "prisma@5.22.0": true,
-    "esbuild@0.28.0": true
+    "esbuild@0.28.0": true,
+    "esbuild@0.21.5": true,
+    "fsevents@2.3.3": true
   }
 }

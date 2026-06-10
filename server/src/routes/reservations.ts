@@ -45,12 +45,13 @@ reservationsRouter.post(
           return existing;
         }
 
-        // Best-effort per-user limit (the hard guarantee is the seat-level
-        // partial unique index; this count is not lock-serialized).
-        const activeCount = await tx.reservation.count({
-          where: { userId, status: { in: ["HELD", "CONFIRMED"] } },
+        // Best-effort per-user hold limit — CONFIRMED reservations are not
+        // holds and do not count (the hard guarantee is the seat-level partial
+        // unique index; this count is not lock-serialized).
+        const heldCount = await tx.reservation.count({
+          where: { userId, status: "HELD" },
         });
-        if (activeCount >= env.maxActiveReservationsPerUser) {
+        if (heldCount >= env.maxActiveReservationsPerUser) {
           throw new ApiError(
             409,
             "reservation_limit",

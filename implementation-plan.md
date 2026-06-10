@@ -40,9 +40,14 @@ seat-reservation-platform-1/
 │       ├── lib/ (prisma, jwt, cookies, password)
 │       ├── middleware/ (auth, rateLimit, errors)
 │       └── routes/ (auth, seats, reservations, payment)
-└── web/                        # Vite + React client
+└── web/                        # Vite + React client (port 5174)
     ├── vite.config.ts          # dev proxy /api → :4001
-    └── src/ (pages, api client, components)
+    └── src/
+        ├── api.ts              # fetch client (refresh-on-401), typed responses
+        ├── auth.tsx            # auth context (/me on load, login/register/logout)
+        ├── hooks.ts            # useCountdown for hold expiry
+        ├── App.tsx             # routes + Protected wrapper
+        └── pages/ (Login, Seats)   # Seats = multi-select + Hold + inline Pay-all
 ```
 
 ## 4. Data model
@@ -86,6 +91,7 @@ Hold lifecycle (race-safe, done in a transaction):
 | POST   | `/api/auth/refresh`          | Rotate refresh token, issue new access cookie        |
 | POST   | `/api/auth/logout`           | Revoke refresh token, clear cookies                  |
 | GET    | `/api/auth/me`               | Current user                                         |
+| GET    | `/api/config`                | Public client config (seat price, hold TTL, max seats) |
 | GET    | `/api/seats`                 | List seats + live availability (optional auth → `mine`) |
 | POST   | `/api/reservations`          | Hold a seat (auth; idempotent, limit-checked, race-safe) |
 | GET    | `/api/reservations/:id`      | Hold/reservation status, owner-only (auth)           |
@@ -98,7 +104,9 @@ Hold lifecycle (race-safe, done in a transaction):
 1. **Intent** — `POST /api/payments/:reservationId/intent`: validates ownership +
    live hold (expired → `409 hold_expired`), upserts a `PENDING` Payment
    (`amountCents = SEAT_PRICE_CENTS`), and returns a `checkoutUrl`
-   (`${WEB_ORIGIN}/checkout/:reservationId`) — mirroring a redirect to a hosted page.
+   (`${WEB_ORIGIN}/checkout/:reservationId`) — mirroring a redirect to a hosted
+   page. (The SPA now completes payment inline rather than navigating to this
+   URL; the field is retained to reflect real provider semantics.)
 2. **Confirm (callback)** — `POST /api/payments/:reservationId/confirm?outcome=success|fail|timeout`,
    all in a transaction with ownership + hold-expiry re-checks:
    - `success` → Payment `SUCCEEDED`, Reservation `CONFIRMED` (sets `confirmedAt`).
@@ -122,8 +130,14 @@ Hold lifecycle (race-safe, done in a transaction):
       confirm callback) with transactional confirmation, hold-expiry re-checks,
       idempotency, and a cancel-hold endpoint. Verified success / fail (seat
       freed) / timeout (retryable) / expired-hold / cancel / invalid-outcome.
-- [ ] **Phase 4 — Frontend:** login page, seat picker (live availability),
-      payment page with outcome selector, confirmation/expired states.
+- [x] **Phase 4 — Frontend:** Vite + React SPA — login/register and a single
+      seats page: click to **multi-select up to 2 seats**, a **Hold** button
+      creates the holds, then an **inline payment section** (with per-seat
+      countdowns + total) offers **Pay all / Simulate failure / Simulate
+      timeout**; success flips seats to "Reserved ✓" in place. 3s polling,
+      refresh-on-401 in the API client. Build + proxy + end-to-end verified.
+      (The standalone `/checkout` + `/confirmation` routes were replaced by this
+      inline flow; the `/intent` + `/confirm` API endpoints are unchanged.)
 - [ ] **Phase 5 — Polish:** README run instructions, error handling, edge-case
       pass, final DECISIONS.md review.
 
