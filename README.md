@@ -57,7 +57,7 @@ Copy `.env.example` to `.env` and adjust as needed:
 | `DATABASE_URL` | Postgres connection (matches `docker-compose.yml`, port **5434**) |
 | `PORT` | API port (default `4001`) |
 | `WEB_ORIGIN` | Vite dev origin (default `http://localhost:5174`) |
-| `ACCESS_TOKEN_SECRET` / `REFRESH_TOKEN_SECRET` | JWT signing secrets — change in any real environment |
+| `ACCESS_TOKEN_SECRET` | Access-JWT signing secret — change in any real environment (refresh tokens are opaque DB-tracked values; no secret needed) |
 | `ACCESS_TOKEN_TTL` | Short-lived access token (default `15m`) |
 | `REFRESH_TOKEN_TTL_DAYS` | Refresh token lifetime / session length (default `90`) |
 | `HOLD_TTL_SECONDS` | How long a seat hold lasts (default `30` — set low to test expiry) |
@@ -97,6 +97,9 @@ npm test
 | Test | What it validates |
 | ---- | ----------------- |
 | Concurrent holds on one seat | Exactly one `201` + one `409 seat_unavailable`; DB has one active row |
+| Refresh after logout | `401` — sessions are revoked server-side, not just cookie-cleared |
+| Rotated refresh token replayed | `401 refresh_token_reused`; all of the user's sessions are burned |
+| Two concurrent refreshes | Exactly one wins (atomic CAS rotation) |
 | Payment `?outcome=fail` | Reservation `FAILED`; seat bookable again |
 | Payment `?outcome=timeout` → `success` | Stays `HELD` after timeout; retry confirms |
 | Expired hold + intent | `409 hold_expired` |
@@ -132,8 +135,9 @@ See `DECISIONS.md` §8 for the full list. Quick checks in the UI:
 
 ## Architecture (summary)
 
-- **API:** Express + TypeScript, cookie-based JWT auth (access + refresh, 90-day
-  session via refresh rotation).
+- **API:** Express + TypeScript, cookie-based auth — short-lived access JWT +
+  opaque, DB-tracked refresh token (90-day session via atomic rotation, with
+  reuse detection that burns all sessions on replay).
 - **DB:** PostgreSQL; holds are `Reservation` rows with expiry; a **partial
   unique index** enforces at most one active (`HELD` or `CONFIRMED`) reservation
   per seat.
