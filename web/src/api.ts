@@ -62,9 +62,12 @@ async function request<T>(
   allowRefresh = true,
 ): Promise<T> {
   const res = await fetch(path, {
-    credentials: "include",
-    headers: { "Content-Type": "application/json", ...(options.headers ?? {}) },
     ...options,
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers ?? {}),
+    },
   });
 
   // Transparently refresh an expired access token once, then retry.
