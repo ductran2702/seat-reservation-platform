@@ -120,7 +120,7 @@ Hold lifecycle (race-safe, done in a transaction):
 - [x] **Phase 0 — Foundation (this step):** monorepo init, docker-compose,
       `.env.example`, Prisma schema, partial index, seed 3 seats + demo user,
       `db:push` verified.
-- [ ] **Phase 1 — Auth:** password hashing, JWT issue/verify, cookie helpers,
+- [x] **Phase 1 — Auth:** password hashing, JWT issue/verify, cookie helpers,
       register/login/refresh/logout/me, auth middleware, auth rate limiter.
 - [x] **Phase 2 — Seats & holds:** `GET /seats` (optional-auth availability +
       `mine`), `POST /reservations` (transactional sweep + idempotent re-hold +
@@ -132,14 +132,20 @@ Hold lifecycle (race-safe, done in a transaction):
       freed) / timeout (retryable) / expired-hold / cancel / invalid-outcome.
 - [x] **Phase 4 — Frontend:** Vite + React SPA — login/register and a single
       seats page: click to **multi-select up to 2 seats**, a **Hold** button
-      creates the holds, then an **inline payment section** (with per-seat
-      countdowns + total) offers **Pay all / Simulate failure / Simulate
-      timeout**; success flips seats to "Reserved ✓" in place. 3s polling,
-      refresh-on-401 in the API client. Build + proxy + end-to-end verified.
-      (The standalone `/checkout` + `/confirmation` routes were replaced by this
-      inline flow; the `/intent` + `/confirm` API endpoints are unchanged.)
-- [ ] **Phase 5 — Polish:** README run instructions, error handling, edge-case
-      pass, final DECISIONS.md review.
+      creates the holds, then an **inline payment section** (single shared
+      "Expires in" countdown + total + one **Cancel** button that releases all
+      holds) offers **Pay all / Simulate failure / Simulate timeout** in a
+      3-column row; success flips seats to "Reserved ✓" in place. Confirmed
+      seats don't count toward the hold limit. 3s polling, refresh-on-401 in the
+      API client. Build + proxy + end-to-end verified. (The standalone
+      `/checkout` + `/confirmation` routes were replaced by this inline flow; the
+      `/intent` + `/confirm` API endpoints are unchanged.)
+- [~] **Phase 5 — Polish:** automated concurrency test added (`npm test`,
+      Vitest) — *two concurrent holds on one seat → exactly one `201` + one
+      `409`, and the DB holds exactly one active reservation*; server bootstrap
+      refactored into `createApp()` (`src/app.ts`) so it is testable.
+      Remaining: README run instructions, broader edge-case coverage, final
+      DECISIONS.md review.
 
 ## 8. Run commands (target)
 
@@ -149,4 +155,5 @@ npm install
 npm run db:up      # start Postgres container
 npm run db:push    # prisma db push + apply partial index + seed
 npm run dev        # server + web concurrently
+npm test           # concurrency test (requires db:up; asserts only one hold wins)
 ```

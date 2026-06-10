@@ -11,7 +11,8 @@
     "db:push": "dotenv -e ../.env -- prisma db push && dotenv -e ../.env -- prisma db execute --file ./prisma/partial-index.sql --schema ./prisma/schema.prisma && npm run db:seed",
     "db:seed": "dotenv -e ../.env -- tsx prisma/seed.ts",
     "db:studio": "dotenv -e ../.env -- prisma studio",
-    "generate": "dotenv -e ../.env -- prisma generate"
+    "generate": "dotenv -e ../.env -- prisma generate",
+    "test": "dotenv -e ../.env -- vitest run"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -34,6 +35,7 @@
     "dotenv-cli": "^7.4.4",
     "prisma": "^5.22.0",
     "tsx": "^4.19.2",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
   }
 }

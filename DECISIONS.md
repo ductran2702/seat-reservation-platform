@@ -94,7 +94,9 @@ via `DELETE /api/reservations/:id` (→ `CANCELLED`).
 - **No CSRF double-submit token** — relying on `SameSite=Strict` for this scope.
 - **No realtime seat updates** (websockets/SSE) — client refetches availability.
 - **No CSP / Helmet hardening, no audit logging, no observability/metrics.**
-- **Minimal automated tests** — failure paths are exercised manually (see §8).
+- **Minimal automated tests** — one automated integration test covers the
+  critical concurrency invariant (`npm test`); the remaining failure paths are
+  exercised manually (see §8).
 - **No production deployment / CI** — local-first per the assessment.
 
 ## 8. How to test failure paths
@@ -112,7 +114,10 @@ callback).
   set it low to test), then refetch — the hold shows `EXPIRED` and the seat is
   bookable again. The next reservation attempt lazily expires the stale hold, and
   `intent`/`confirm` on an expired hold return `409 hold_expired`.
-- **Double-booking race:** fire two concurrent `POST /api/reservations` for the
-  same seat — exactly one succeeds, the other gets `409 Conflict`.
+- **Double-booking race (automated):** `npm test` (Vitest) mounts the app on an
+  ephemeral port, registers two users, and fires two concurrent
+  `POST /api/reservations` for the same seat — asserting exactly one `201` and
+  one `409 seat_unavailable`, and that the DB ends with exactly one active
+  reservation for that seat. (Requires `npm run db:up`.)
 - **Voluntary cancel:** `DELETE /api/reservations/:id` on your own `HELD` seat
   frees it immediately (`CANCELLED`); confirmed seats return `409`.
