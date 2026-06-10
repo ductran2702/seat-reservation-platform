@@ -97,3 +97,31 @@ reservationsRouter.get(
     res.json({ reservation: toReservationView(reservation) });
   }),
 );
+
+// Voluntarily release a held seat (user backs out before paying).
+reservationsRouter.delete(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    const reservation = await prisma.reservation.findUnique({
+      where: { id: req.params.id },
+      include: { seat: true, payment: true },
+    });
+    if (!reservation || reservation.userId !== req.userId) {
+      throw new ApiError(404, "reservation_not_found");
+    }
+    if (reservation.status === "CONFIRMED") {
+      throw new ApiError(409, "already_confirmed", "Confirmed seats cannot be cancelled");
+    }
+    // Only an active hold needs releasing; others are already inactive (idempotent).
+    if (reservation.status === "HELD") {
+      const updated = await prisma.reservation.update({
+        where: { id: reservation.id },
+        data: { status: "CANCELLED" },
+        include: { seat: true, payment: true },
+      });
+      res.json({ reservation: toReservationView(updated) });
+      return;
+    }
+    res.json({ reservation: toReservationView(reservation) });
+  }),
+);

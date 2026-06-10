@@ -89,15 +89,23 @@ Hold lifecycle (race-safe, done in a transaction):
 | GET    | `/api/seats`                 | List seats + live availability (optional auth → `mine`) |
 | POST   | `/api/reservations`          | Hold a seat (auth; idempotent, limit-checked, race-safe) |
 | GET    | `/api/reservations/:id`      | Hold/reservation status, owner-only (auth)           |
-| POST   | `/api/payments/:reservationId` | Start mock payment; honors `?outcome=`             |
+| DELETE | `/api/reservations/:id`      | Cancel own HELD reservation → CANCELLED (auth)       |
+| POST   | `/api/payments/:reservationId/intent`  | Create payment intent, return mock checkout URL (auth) |
+| POST   | `/api/payments/:reservationId/confirm` | Mock provider callback; honors `?outcome=` (auth)  |
 
-## 6. Mock payment flow
+## 6. Mock payment flow (two-step provider simulation)
 
-`POST /api/payments/:reservationId?outcome=success|fail|timeout`
-- `success` → mark Payment `SUCCEEDED`, Reservation `CONFIRMED` (in a tx).
-- `fail` → Payment `FAILED`, Reservation `FAILED` (seat freed).
-- `timeout` → simulated provider delay then Payment `TIMEOUT`; reservation stays
-  `HELD` until its hold expires (demonstrates the expiry path).
+1. **Intent** — `POST /api/payments/:reservationId/intent`: validates ownership +
+   live hold (expired → `409 hold_expired`), upserts a `PENDING` Payment
+   (`amountCents = SEAT_PRICE_CENTS`), and returns a `checkoutUrl`
+   (`${WEB_ORIGIN}/checkout/:reservationId`) — mirroring a redirect to a hosted page.
+2. **Confirm (callback)** — `POST /api/payments/:reservationId/confirm?outcome=success|fail|timeout`,
+   all in a transaction with ownership + hold-expiry re-checks:
+   - `success` → Payment `SUCCEEDED`, Reservation `CONFIRMED` (sets `confirmedAt`).
+   - `fail` → Payment `FAILED`, Reservation `FAILED` (seat freed; user may re-hold).
+   - `timeout` → Payment `TIMEOUT` (returned immediately, no delay); reservation
+     stays `HELD` and is retryable until the hold expires.
+   - Confirming an already-`CONFIRMED` reservation is idempotent (`200`).
 
 ## 7. Build order (phases)
 
@@ -110,8 +118,10 @@ Hold lifecycle (race-safe, done in a transaction):
       `mine`), `POST /reservations` (transactional sweep + idempotent re-hold +
       per-user limit + P2002 → 409), owner-only status endpoint. Verified incl.
       cross-user conflict, limit, lazy expiry, and a double-booking race.
-- [ ] **Phase 3 — Payment:** mock payment route with outcome simulation,
-      transactional confirmation.
+- [x] **Phase 3 — Payment:** two-step mock payment (intent → checkout URL →
+      confirm callback) with transactional confirmation, hold-expiry re-checks,
+      idempotency, and a cancel-hold endpoint. Verified success / fail (seat
+      freed) / timeout (retryable) / expired-hold / cancel / invalid-outcome.
 - [ ] **Phase 4 — Frontend:** login page, seat picker (live availability),
       payment page with outcome selector, confirmation/expired states.
 - [ ] **Phase 5 — Polish:** README run instructions, error handling, edge-case

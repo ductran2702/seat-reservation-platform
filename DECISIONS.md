@@ -45,7 +45,7 @@ React (Vite :5174) ──/api proxy──▶ Express (:4001) ──Prisma──�
 | PostgreSQL via docker-compose | SQLite, hosted Postgres | Real transactional + partial-index semantics; reproducible for reviewers | Managed Postgres + connection pooling (PgBouncer) |
 | Access + refresh JWT in httpOnly+Secure+SameSite=Strict cookies | Single 90d token; server sessions | XSS-safe (no JS access), CSRF-resistant (Strict), revocable via DB-stored refresh tokens; 90d session via refresh rotation | Token theft detection (reuse → revoke family), CSRF double-submit token |
 | Hold-with-expiry + partial unique index | `SELECT ... FOR UPDATE`, optimistic version check | DB is the single source of truth for "one active row per seat"; survives races without app-level locking | Background sweeper job + Redis-backed hold TTL, websockets for live seat updates |
-| Mock payment route with `?outcome=` | Stripe test mode | Deterministically exercises success / fail / timeout without external deps | Real provider webhook + idempotency keys + signature verification |
+| Two-step mock payment (intent → checkout URL → confirm callback) with `?outcome=` | Single synchronous endpoint; Stripe test mode | Mirrors a real redirect/callback flow and deterministically exercises success / fail / timeout without external deps | Real provider webhook + idempotency keys + signature verification |
 | Basic rate limit on auth only | Rate limit everything; none | Highest-value target (credential stuffing) within time budget | Distributed rate limiting (Redis), per-IP + per-account limits, lockout |
 
 ## 5. Concurrency model
@@ -61,8 +61,11 @@ per-user active limit (`MAX_ACTIVE_RESERVATIONS_PER_USER`, default 2), then
 (4) inserts the new hold; a unique-violation (Prisma `P2002`) means another
 request already holds the seat, returned as `409 Conflict`. The seat-level
 guarantee is hard (DB-enforced); the per-user limit is best-effort (a count, not
-lock-serialized). Payment success flips `HELD → CONFIRMED` in a transaction;
-failure/timeout leaves the seat free (immediately, or after the hold expires).
+lock-serialized). Payment confirmation re-checks ownership and hold-expiry inside
+a transaction before flipping `HELD → CONFIRMED` (so an expired hold can never be
+paid into a confirmation); `fail` releases the seat (`FAILED`), `timeout` leaves
+it `HELD` and retryable until expiry. A user can also voluntarily release a hold
+via `DELETE /api/reservations/:id` (→ `CANCELLED`).
 
 ## 6. Security notes
 
@@ -94,12 +97,20 @@ failure/timeout leaves the seat free (immediately, or after the hold expires).
 
 ## 8. How to test failure paths
 
-- **Payment failure:** drive payment with `?outcome=fail` → payment `FAILED`,
+The payment flow is two-step: `POST /api/payments/:id/intent` (returns a mock
+`checkoutUrl`) then `POST /api/payments/:id/confirm?outcome=...` (the provider
+callback).
+
+- **Payment failure:** confirm with `?outcome=fail` → payment `FAILED`,
   reservation `FAILED`, seat returns to available.
-- **Payment timeout:** `?outcome=timeout` → simulated provider delay then
-  `TIMEOUT`; reservation stays `HELD` and is not confirmed.
+- **Payment timeout:** `?outcome=timeout` → payment `TIMEOUT` returned
+  immediately; reservation stays `HELD` and is retryable (re-confirm with
+  `?outcome=success` confirms it).
 - **Expired hold:** create a hold, wait past `HOLD_TTL` (configurable via env;
   set it low to test), then refetch — the hold shows `EXPIRED` and the seat is
-  bookable again. The next reservation attempt lazily expires the stale hold.
+  bookable again. The next reservation attempt lazily expires the stale hold, and
+  `intent`/`confirm` on an expired hold return `409 hold_expired`.
 - **Double-booking race:** fire two concurrent `POST /api/reservations` for the
   same seat — exactly one succeeds, the other gets `409 Conflict`.
+- **Voluntary cancel:** `DELETE /api/reservations/:id` on your own `HELD` seat
+  frees it immediately (`CANCELLED`); confirmed seats return `409`.

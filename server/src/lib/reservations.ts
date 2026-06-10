@@ -31,6 +31,26 @@ export interface ReservationView {
   createdAt: string;
 }
 
+export interface PaymentView {
+  id: string;
+  reservationId: string;
+  amountCents: number;
+  status: Payment["status"];
+  outcome: string | null;
+  createdAt: string;
+}
+
+export function toPaymentView(payment: Payment): PaymentView {
+  return {
+    id: payment.id,
+    reservationId: payment.reservationId,
+    amountCents: payment.amountCents,
+    status: payment.status,
+    outcome: payment.outcome,
+    createdAt: payment.createdAt.toISOString(),
+  };
+}
+
 export function toReservationView(
   reservation: Reservation & { seat?: Seat | null; payment?: Payment | null },
   now = new Date(),
