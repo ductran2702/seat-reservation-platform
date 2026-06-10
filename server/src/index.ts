@@ -1,15 +1,25 @@
 import express from "express";
+import cookieParser from "cookie-parser";
+import { env } from "./lib/env.js";
+import { authRouter } from "./routes/auth.js";
+import { errorHandler, notFound } from "./middleware/errors.js";
 
 const app = express();
+app.set("trust proxy", 1);
 app.use(express.json());
+app.use(cookieParser());
 
-// Phase 0 placeholder. Auth, seats, reservations, and payment routes are
-// added in later phases (see implementation-plan.md).
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
-const port = Number(process.env.PORT ?? 4000);
-app.listen(port, () => {
-  console.log(`API listening on http://localhost:${port}`);
+app.use("/api/auth", authRouter);
+
+// Seats, reservations, and payment routes are added in later phases.
+
+app.use(notFound);
+app.use(errorHandler);
+
+app.listen(env.port, () => {
+  console.log(`API listening on http://localhost:${env.port}`);
 });
