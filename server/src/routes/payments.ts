@@ -73,6 +73,11 @@ paymentsRouter.post(
 );
 
 // Step 2 — the mock provider "callback". Outcome is driven by ?outcome=.
+// Idempotent: the one-Payment-per-reservation UNIQUE constraint plus the
+// CONFIRMED no-op below mean a double-click/retry can never double-charge.
+// TODO(prod): a real PSP's webhook (not this HTTP response) is the source of
+// truth — verify its signature and dedupe on payment_intent_id, since PSPs
+// redeliver webhooks aggressively.
 paymentsRouter.post(
   "/:reservationId/confirm",
   asyncHandler(async (req, res) => {
