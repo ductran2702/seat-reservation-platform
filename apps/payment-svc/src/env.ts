@@ -17,4 +17,5 @@ export const env = {
   seatSvcUrl: process.env.SEAT_SVC_URL ?? "http://localhost:3002",
   webOrigin: process.env.WEB_ORIGIN ?? "http://localhost:5174",
   seatPriceCents: Number(process.env.SEAT_PRICE_CENTS ?? 2500),
+  outboxPollIntervalMs: Number(process.env.OUTBOX_POLL_INTERVAL_MS ?? 1000),
 };

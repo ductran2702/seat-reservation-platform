@@ -1,12 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "@srp/db";
-import {
-  ApiError,
-  INTERNAL_SECRET_HEADER,
-  asyncHandler,
-  createInternalAuth,
-} from "@srp/linkz-core";
+import { ApiError, asyncHandler, createInternalAuth } from "@srp/linkz-core";
 import { env } from "../env.js";
 import { toPaymentView, toReservationView } from "../lib/views.js";
 
@@ -16,20 +11,6 @@ export const paymentsRouter = Router();
 paymentsRouter.use(requireAuth);
 
 const outcomeSchema = z.enum(["success", "fail", "timeout"]);
-
-// payment-svc mutates reservation rows on confirm/fail, but seat-svc is the
-// write authority for seat state — report the mutation so cache invalidation
-// and SSE fan-out happen there. Fire-and-forget (clients poll as fallback).
-function reportSeatChange(type: string, seatId: string): void {
-  fetch(`${env.seatSvcUrl}/internal/seat-changed`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      [INTERNAL_SECRET_HEADER]: env.internalSecret,
-    },
-    body: JSON.stringify({ type, seatId }),
-  }).catch(() => undefined);
-}
 
 // Step 1 — create a payment intent and hand back a (mock) checkout URL.
 // Mirrors initiating a redirect to a hosted payment page.
@@ -105,7 +86,6 @@ paymentsRouter.post(
     const userId = req.userId!;
     const outcome = outcomeSchema.parse(req.query.outcome);
     const now = new Date();
-    let seatStateChanged: string | null = null;
 
     const result = await prisma.$transaction(async (tx) => {
       const reservation = await tx.reservation.findUnique({
@@ -138,7 +118,16 @@ paymentsRouter.post(
           where: { reservationId },
           data: { status: "SUCCEEDED", outcome },
         });
-        seatStateChanged = "reservation_confirmed";
+        // Transactional outbox (Pattern B): the seat_change event commits in
+        // the SAME transaction as the state flip — a crash can never confirm
+        // a payment without enqueueing its event. The outbox worker delivers
+        // it to seat-svc (cache invalidation + SSE) at-least-once.
+        await tx.outboxEvent.create({
+          data: {
+            type: "reservation_confirmed",
+            payload: { seatId: reservation.seatId, reservationId },
+          },
+        });
         return tx.reservation.update({
           where: { id: reservationId },
           data: { status: "CONFIRMED", confirmedAt: now },
@@ -151,7 +140,12 @@ paymentsRouter.post(
           where: { reservationId },
           data: { status: "FAILED", outcome },
         });
-        seatStateChanged = "reservation_failed";
+        await tx.outboxEvent.create({
+          data: {
+            type: "reservation_failed",
+            payload: { seatId: reservation.seatId, reservationId },
+          },
+        });
         // Free the seat: a failed payment releases the hold.
         return tx.reservation.update({
           where: { id: reservationId },
@@ -172,9 +166,28 @@ paymentsRouter.post(
       });
     });
 
-    if (seatStateChanged) {
-      reportSeatChange(seatStateChanged, result.seatId);
+    // Payment metrics: structured JSON with an `action` field so a log
+    // aggregator can alert on a payment_failure spike.
+    if (outcome === "success") {
+      console.log(
+        JSON.stringify({
+          action: "payment_success",
+          reservationId,
+          userId,
+          amountCents: result.payment?.amountCents ?? null,
+        }),
+      );
+    } else {
+      console.log(
+        JSON.stringify({
+          action: "payment_failure",
+          reservationId,
+          userId,
+          outcome,
+        }),
+      );
     }
+
     res.json({ reservation: toReservationView(result) });
   }),
 );

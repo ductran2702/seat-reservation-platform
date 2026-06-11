@@ -22,6 +22,31 @@ enum PaymentStatus {
   TIMEOUT
 }
 
+enum OutboxStatus {
+  PENDING
+  PROCESSED
+  DEAD
+}
+
+// Transactional outbox (payment-svc, Pattern B): events are written in the
+// SAME transaction as the business mutation, so a crash can never confirm a
+// payment without enqueueing its event (or vice versa). A poll worker
+// delivers them at-least-once and only marks PROCESSED after success;
+// poisoned events go to DEAD after max attempts instead of blocking the queue.
+model OutboxEvent {
+  id          String       @id @default(cuid())
+  type        String
+  payload     Json
+  status      OutboxStatus @default(PENDING)
+  attempts    Int          @default(0)
+  lastError   String?
+  processedAt DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([status, createdAt])
+}
+
 model User {
   id           String         @id @default(cuid())
   email        String         @unique
