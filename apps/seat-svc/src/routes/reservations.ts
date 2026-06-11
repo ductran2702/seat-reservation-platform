@@ -8,6 +8,10 @@ import {
 } from "@srp/linkz-core";
 import { env } from "../env.js";
 import { publishSeatChange } from "../events.js";
+import {
+  cancelHoldExpiry,
+  scheduleHoldExpiry,
+} from "../expiryScheduler.js";
 import { toReservationView } from "../lib/views.js";
 
 const { requireAuth } = createInternalAuth(env.internalSecret);
@@ -104,6 +108,9 @@ reservationsRouter.post(
       });
 
       if (createdHold) {
+        // Precise expiry: emit hold_expired the moment the countdown hits 0
+        // (the interval sweeper remains as backstop).
+        scheduleHoldExpiry(reservation);
         publishSeatChange({ type: "hold_created", seatId });
       }
       res.status(201).json({ reservation: toReservationView(reservation) });
@@ -174,6 +181,7 @@ reservationsRouter.delete(
         data: { status: "CANCELLED" },
         include: { seat: true, payment: true },
       });
+      cancelHoldExpiry(reservation.id);
       publishSeatChange({ type: "hold_cancelled", seatId: reservation.seatId });
       res.json({ reservation: toReservationView(updated) });
       return;

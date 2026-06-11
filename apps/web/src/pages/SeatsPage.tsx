@@ -193,6 +193,15 @@ export function SeatsPage() {
       : null;
   const holdSecondsLeft = useCountdown(earliestExpiry);
 
+  // When the countdown hits 0, refetch right away instead of waiting for the
+  // next poll — the server also pushes hold_expired over SSE at this moment,
+  // so whichever arrives first updates the view.
+  useEffect(() => {
+    if (holdSecondsLeft === 0 && myHolds.length > 0) {
+      refresh();
+    }
+  }, [holdSecondsLeft, myHolds.length, refresh]);
+
   const priceCents = config?.seatPriceCents ?? 0;
   const totalCents = priceCents * myHolds.length;
 
