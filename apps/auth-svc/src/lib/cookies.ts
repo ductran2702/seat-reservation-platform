@@ -13,7 +13,7 @@ const REFRESH_COOKIE_PATH = "/api/auth";
 
 const baseCookie = {
   httpOnly: true,
-  secure: env.isProd,
+  secure: env.cookieSecure,
   sameSite: "strict" as const,
 };
 

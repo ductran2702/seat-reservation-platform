@@ -9,7 +9,10 @@ import {
 } from "../api";
 import { useCountdown, formatSeconds } from "../hooks";
 
-const POLL_MS = 3000;
+// Polling is the fallback transport. While the SSE stream is connected we
+// slow it down to a drift guard; if the stream drops we go back to 3s.
+const FAST_POLL_MS = 3000;
+const SLOW_POLL_MS = 30000;
 const MAX_SEATS = 2;
 
 export function SeatsPage() {
@@ -35,8 +38,39 @@ export function SeatsPage() {
   useEffect(() => {
     refresh();
     api.config().then(setConfig).catch(() => undefined);
-    const id = setInterval(refresh, POLL_MS);
-    return () => clearInterval(id);
+
+    let pollId: number | undefined;
+    const setPolling = (ms: number) => {
+      if (pollId !== undefined) window.clearInterval(pollId);
+      pollId = window.setInterval(refresh, ms);
+    };
+    setPolling(FAST_POLL_MS);
+
+    // Live availability over SSE: the gateway pushes a personalized snapshot
+    // on connect and a seat_change event on every mutation (hold created,
+    // cancelled, expired by the sweeper, payment confirmed/failed).
+    // EventSource auto-reconnects; polling covers the gaps.
+    const stream = new EventSource("/api/seats/stream");
+    stream.addEventListener("snapshot", (event) => {
+      try {
+        const data = JSON.parse((event as MessageEvent).data) as {
+          seats?: SeatView[];
+        };
+        if (data.seats) setSeats(data.seats);
+      } catch {
+        // Malformed frame — the next poll corrects the view.
+      }
+    });
+    stream.addEventListener("seat_change", () => {
+      refresh();
+    });
+    stream.onopen = () => setPolling(SLOW_POLL_MS);
+    stream.onerror = () => setPolling(FAST_POLL_MS);
+
+    return () => {
+      stream.close();
+      if (pollId !== undefined) window.clearInterval(pollId);
+    };
   }, [refresh]);
 
   const myHolds = seats.filter((s) => s.mine && s.status === "HELD");
@@ -276,7 +310,9 @@ export function SeatsPage() {
         </div>
       )}
 
-      <p className="muted hint">Seats refresh automatically every few seconds.</p>
+      <p className="muted hint">
+        Seat availability updates live (SSE), with polling as fallback.
+      </p>
     </div>
   );
 }

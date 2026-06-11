@@ -1,11 +1,20 @@
+# Full production-aware stack: nginx edge → gateway → {auth,seat,payment}-svc,
+# with Postgres (behind PgBouncer), Redis, and the static web bundle.
+#
+# Run from the repo root:   make up        (docker compose --env-file .env -f infra/docker-compose.yml up --build)
+# Tear down:                make down
+#
+# Local-dev convenience: `npm run db:up` starts only postgres + redis, with
+# Postgres exposed on host port 5434 (avoids clashing with local databases).
+
 services:
-  db:
+  postgres:
     image: postgres:16-alpine
     container_name: seat_reservation_db
     restart: unless-stopped
     environment:
       POSTGRES_USER: seat
-      POSTGRES_PASSWORD: seat
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
       POSTGRES_DB: seat_reservation
     ports:
       - "5434:5432"
@@ -16,6 +25,158 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # Connection pooler: services connect here (transaction mode) instead of
+  # opening a Postgres session each. ⚠ The seat-svc sweeper uses session-level
+  # advisory locks and therefore connects DIRECTLY to postgres:5432 via
+  # SWEEPER_DATABASE_URL, bypassing PgBouncer.
+  pgbouncer:
+    image: bitnami/pgbouncer:latest
+    restart: unless-stopped
+    environment:
+      POSTGRESQL_HOST: postgres
+      POSTGRESQL_PORT: 5432
+      POSTGRESQL_USERNAME: seat
+      POSTGRESQL_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRESQL_DATABASE: seat_reservation
+      PGBOUNCER_DATABASE: seat_reservation
+      PGBOUNCER_PORT: "6432"
+      PGBOUNCER_POOL_MODE: transaction # stateless queries only — see sweeper note
+      PGBOUNCER_MAX_CLIENT_CONN: "1000"
+      PGBOUNCER_DEFAULT_POOL_SIZE: "20"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  # One-shot schema init: prisma db push + partial unique index + seed.
+  # Reuses the auth-svc image (it contains the prisma schema + CLI).
+  db-init:
+    build:
+      context: ..
+      dockerfile: apps/auth-svc/Dockerfile
+    restart: "no"
+    environment:
+      DATABASE_URL: postgres://seat:${POSTGRES_PASSWORD}@postgres:5432/seat_reservation
+    command: >
+      sh -c "npx prisma db push --schema packages/db/prisma/schema.prisma --skip-generate &&
+             npx prisma db execute --file packages/db/prisma/partial-index.sql --schema packages/db/prisma/schema.prisma &&
+             npx tsx packages/db/prisma/seed.ts"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - gateway
+      - web
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: apps/gateway/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      AUTH_SVC_URL: http://auth-svc:3001
+      SEAT_SVC_URL: http://seat-svc:3002
+      PAYMENT_SVC_URL: http://payment-svc:3003
+      INTERNAL_SECRET: ${INTERNAL_SECRET:?required}
+      ACCESS_TOKEN_SECRET: ${ACCESS_TOKEN_SECRET:?required}
+      # tokenVersion checks (reads) go through PgBouncer.
+      DATABASE_URL: postgres://seat:${POSTGRES_PASSWORD}@pgbouncer:6432/seat_reservation
+      SEAT_PRICE_CENTS: ${SEAT_PRICE_CENTS:-2500}
+      HOLD_TTL_SECONDS: ${HOLD_TTL_SECONDS:-30}
+      MAX_ACTIVE_RESERVATIONS_PER_USER: ${MAX_ACTIVE_RESERVATIONS_PER_USER:-2}
+    depends_on:
+      - auth-svc
+      - seat-svc
+      - payment-svc
+
+  auth-svc:
+    build:
+      context: ..
+      dockerfile: apps/auth-svc/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      # Prisma through PgBouncer (transaction mode) needs ?pgbouncer=true.
+      DATABASE_URL: postgres://seat:${POSTGRES_PASSWORD}@pgbouncer:6432/seat_reservation?pgbouncer=true
+      ACCESS_TOKEN_SECRET: ${ACCESS_TOKEN_SECRET:?required}
+      INTERNAL_SECRET: ${INTERNAL_SECRET:?required}
+      # This stack serves plain HTTP (no TLS at nginx yet) — Secure cookies
+      # would be dropped by the browser. Set true once TLS terminates at nginx.
+      COOKIE_SECURE: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_started
+      db-init:
+        condition: service_completed_successfully
+
+  seat-svc:
+    build:
+      context: ..
+      dockerfile: apps/seat-svc/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://seat:${POSTGRES_PASSWORD}@pgbouncer:6432/seat_reservation?pgbouncer=true
+      # Sweeper advisory lock is session-level → direct to postgres, no PgBouncer.
+      SWEEPER_DATABASE_URL: postgres://seat:${POSTGRES_PASSWORD}@postgres:5432/seat_reservation
+      INTERNAL_SECRET: ${INTERNAL_SECRET:?required}
+      GATEWAY_URL: http://gateway:3000
+      REDIS_URL: redis://redis:6379
+      HOLD_TTL_SECONDS: ${HOLD_TTL_SECONDS:-30}
+      MAX_ACTIVE_RESERVATIONS_PER_USER: ${MAX_ACTIVE_RESERVATIONS_PER_USER:-2}
+      SWEEP_INTERVAL_MS: ${SWEEP_INTERVAL_MS:-10000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_started
+      redis:
+        condition: service_started
+      db-init:
+        condition: service_completed_successfully
+
+  payment-svc:
+    build:
+      context: ..
+      dockerfile: apps/payment-svc/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://seat:${POSTGRES_PASSWORD}@pgbouncer:6432/seat_reservation?pgbouncer=true
+      INTERNAL_SECRET: ${INTERNAL_SECRET:?required}
+      SEAT_SVC_URL: http://seat-svc:3002
+      WEB_ORIGIN: http://localhost
+      SEAT_PRICE_CENTS: ${SEAT_PRICE_CENTS:-2500}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_started
+      db-init:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
 
 volumes:
   seat_pgdata:
