@@ -2,23 +2,23 @@
   "name": "seat-reservation-platform",
   "version": "1.0.0",
   "private": true,
-  "description": "Public seat reservation platform with mock payment and hold-based concurrency control",
+  "description": "Public seat reservation platform — microservices skeleton (gateway + auth + seat + payment) with mock payment and hold-based concurrency control",
   "workspaces": [
-    "server",
-    "web"
+    "packages/*",
+    "apps/*",
+    "tests"
   ],
   "scripts": {
-    "db:up": "docker compose up -d",
-    "db:down": "docker compose down",
-    "db:logs": "docker compose logs -f db",
-    "db:push": "npm run db:push -w server",
-    "db:seed": "npm run db:seed -w server",
-    "db:studio": "npm run db:studio -w server",
-    "dev": "concurrently -n api,web -c blue,green \"npm run dev -w server\" \"npm run dev -w web\"",
-    "dev:server": "npm run dev -w server",
-    "dev:web": "npm run dev -w web",
-    "build": "npm run build -w server && npm run build -w web",
-    "test": "npm run test -w server"
+    "db:up": "docker compose --env-file .env -f infra/docker-compose.yml up -d postgres redis",
+    "db:down": "docker compose --env-file .env -f infra/docker-compose.yml down",
+    "db:logs": "docker compose --env-file .env -f infra/docker-compose.yml logs -f postgres",
+    "db:push": "npm run db:push -w @srp/db",
+    "db:seed": "npm run db:seed -w @srp/db",
+    "db:studio": "npm run db:studio -w @srp/db",
+    "dev": "concurrently -n gateway,auth,seat,payment,web -c blue,magenta,green,yellow,cyan \"npm run dev -w @srp/gateway\" \"npm run dev -w @srp/auth-svc\" \"npm run dev -w @srp/seat-svc\" \"npm run dev -w @srp/payment-svc\" \"npm run dev -w @srp/web\"",
+    "dev:web": "npm run dev -w @srp/web",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test -w @srp/e2e"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"
