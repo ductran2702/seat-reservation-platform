@@ -69,6 +69,16 @@ export function createApp(overrides: Partial<GatewayConfig> = {}): Express {
 
   const app = express();
   app.set("trust proxy", 1);
+
+  // SSE fan-out ingestion — mounted BEFORE attachUser, which strips the
+  // internal headers from client traffic (this is the one endpoint that
+  // legitimately carries X-Internal-Secret inbound, from seat-svc).
+  app.post(
+    "/internal/events",
+    json(),
+    createInternalEventsHandler(config.internalSecret),
+  );
+
   // No global body parser: proxied requests must stream through untouched.
   app.use(cookieParser());
   app.use(createAttachUser(config));
@@ -86,12 +96,7 @@ export function createApp(overrides: Partial<GatewayConfig> = {}): Express {
     });
   });
 
-  // SSE fan-out: seat-svc reports changes in, browsers stream them out.
-  app.post(
-    "/internal/events",
-    json(),
-    createInternalEventsHandler(config.internalSecret),
-  );
+  // SSE fan-out: browsers stream seat changes out (ingested above).
   app.get(
     "/api/seats/stream",
     createSseHandler({

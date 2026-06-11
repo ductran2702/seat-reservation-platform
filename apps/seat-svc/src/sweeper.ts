@@ -29,10 +29,14 @@ export function startSweeper(pool: pg.Pool): NodeJS.Timeout {
       acquired = Boolean(rows[0]?.acquired);
       if (!acquired) return; // another instance holds the lock — skip
 
+      // "holdExpiresAt" is a tz-less timestamp holding UTC wall time (Prisma
+      // convention) — compare against UTC NOW() so the result doesn't depend
+      // on the session/server timezone.
       const expired = await client.query<{ seatId: string }>(
         `UPDATE "Reservation"
-            SET status = 'EXPIRED', "updatedAt" = NOW()
-          WHERE status = 'HELD' AND "holdExpiresAt" < NOW()
+            SET status = 'EXPIRED', "updatedAt" = (NOW() AT TIME ZONE 'UTC')
+          WHERE status = 'HELD'
+            AND "holdExpiresAt" < (NOW() AT TIME ZONE 'UTC')
           RETURNING "seatId"`,
       );
       for (const row of expired.rows) {

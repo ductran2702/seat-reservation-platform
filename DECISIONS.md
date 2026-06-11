@@ -15,20 +15,40 @@ deliberate trade-offs made under a ~2-hour budget.
 ```bash
 cp .env.example .env && npm install && npm run db:up
 npm run db:push   # prisma db push + partial unique index + seed (3 seats, demo user)
-npm run dev       # Express API + Vite/React client
-npm test          # automated integration tests (requires db:up)
+npm run dev       # gateway + auth/seat/payment services + Vite/React client
+npm test          # automated integration tests through the gateway (requires db:up)
+make up           # alternatively: the full dockerized stack behind nginx :80
 ```
 
-> `npm run db:up` starts Postgres in Docker (host port **5434**). Demo login is
-> seeded and printed by the seed script. See `README.md` for full setup and test
-> instructions.
+> `npm run db:up` starts Postgres (host port **5434**) and Redis in Docker.
+> Demo login is seeded and printed by the seed script. See `README.md` for full
+> setup and test instructions.
 
 ## 3. Architecture
 
-- **Client:** Vite + React talks only to `/api`, which Vite proxies to Express in
-  dev — so the browser sees one origin and cookies stay first-party.
-- **API:** Express + TypeScript, organized into `routes / middleware / lib`.
-- **DB:** PostgreSQL (docker-compose) accessed via Prisma.
+- **Topology:** microservices skeleton — an HTTP **gateway** (:3000) in front
+  of **auth-svc** (:3001), **seat-svc** (:3002) and **payment-svc** (:3003),
+  fronted by **nginx** (:80) in the dockerized stack. The gateway verifies the
+  access cookie once (JWT + `tokenVersion`) and forwards the identity to
+  services via the `X-User-Id` header, authenticated with a shared
+  `X-Internal-Secret` — services never parse cookies or JWTs themselves.
+- **Service boundaries:**
+
+| Service | Why separate |
+| --- | --- |
+| `auth-svc` | Isolated blast radius for credentials; bcrypt is CPU-bound → scale independently |
+| `seat-svc` | Write authority for seat state; owns the partial-unique-index invariant, the expiry sweeper, and the seat cache; no schema shared with payment logic |
+| `payment-svc` | PCI scope isolation; payment secrets not exposed to other services |
+| `gateway` | Single entry point; centralized rate limiting; SSE fan-out; auth context attached once |
+
+- **Client:** Vite + React talks only to `/api`, which Vite proxies to the
+  gateway in dev — so the browser sees one origin and cookies stay first-party.
+- **Services:** Express + TypeScript, organized into `routes / lib`, sharing
+  middleware via `packages/linkz-core`.
+- **DB:** PostgreSQL (docker-compose, behind PgBouncer in the full stack)
+  accessed via Prisma, plus raw `pg` pools with a read/write split
+  (`packages/db`). One shared database in this skeleton — each service owns
+  its tables logically; the physical split (DB per service) is deferred.
 - **Auth:** short-lived access JWT + long-lived (90d) **opaque** refresh token
   (48 random bytes — deliberately *not* a JWT, so the DB record is the single
   source of truth and the session is always revocable), both in httpOnly +
@@ -42,21 +62,31 @@ npm test          # automated integration tests (requires db:up)
   all holds). Confirmed seats do not count toward the hold limit.
 
 ```
-React (Vite :5174) ──/api proxy──▶ Express (:4001) ──Prisma──▶ Postgres (:5434, Docker)
+React ──▶ nginx :80 ──▶ gateway :3000 ──▶ auth-svc :3001 / seat-svc :3002 / payment-svc :3003
+                                              │                 │
+                                              └── Postgres (+PgBouncer) ── Redis (cache)
 ```
+
+(See `README.md` for the full architecture diagram.)
 
 ## 4. Key decisions
 
 | Decision | Alternatives | Why | With more time |
 | --- | --- | --- | --- |
-| Express + TS API, separate Vite/React client | Next.js full-stack, tRPC | Clear server/client split; explicit control over cookies, middleware, and the concurrency code | Shared types package between client/server |
+| Microservices (gateway + auth + seat + payment) | Express monolith | Isolated blast radius per domain; auth-svc scales independently (bcrypt is CPU-bound); PCI scope isolation for payment; seat-svc is the single write authority for seat state | Kafka/async messaging between services; dedicated DB per service; Kubernetes HPA per pod |
+| Shared `packages/linkz-core` for auth middleware | Duplicate per service | Auth logic must be identical everywhere; one security fix propagates to every service | Pin to semver, test in CI before updating |
+| Gateway as single entry point (`X-User-Id` + `X-Internal-Secret` internal headers) | Direct client → service; mTLS between services | Centralized rate limiting; one TLS termination; auth context verified once at the edge; services stay cookie/JWT-free | Service mesh (Istio) for mTLS; distributed tracing; per-service authz policies |
+| Express + TS services, separate Vite/React client | Next.js full-stack, tRPC | Clear server/client split; explicit control over cookies, middleware, and the concurrency code | Shared types package between client/server |
 | PostgreSQL via docker-compose | SQLite, hosted Postgres | Real transactional + partial-index semantics; reproducible for reviewers | Managed Postgres + connection pooling (PgBouncer) |
 | Access JWT + **opaque** refresh token, both in httpOnly+Secure+SameSite=Strict cookies | Refresh-token-as-JWT; localStorage; server sessions | A signed/stateless refresh token contradicts "90-day **revocable** session" — opaque + DB hash keeps revocation authoritative. XSS-safe (no JS access), CSRF-resistant (Strict); rotation is an atomic CAS; reuse of a rotated token revokes every session (theft detection) | Grace window to distinguish legit network retries from theft; device binding (DPoP); CSRF double-submit token |
 | Client `Idempotency-Key` (UUID header) on hold creation, UNIQUE in DB | Rely only on natural keys (user+seat) | Retried POSTs (double-click, network blip) replay the original reservation instead of duplicating; UNIQUE constraint backstops concurrent retries | Same pattern on payment confirm against a real PSP (`payment_intent_id` as the natural key) |
-| Hold-with-expiry + partial unique index | `SELECT ... FOR UPDATE`, optimistic version check | DB is the single source of truth for "one active row per seat"; survives races without app-level locking | Background sweeper job + Redis-backed hold TTL, websockets for live seat updates |
+| Hold-with-expiry + partial unique index | `SELECT ... FOR UPDATE`, optimistic version check | DB is the single source of truth for "one active row per seat"; survives races without app-level locking | Redis ZSET hold TTLs to take expiry pressure off Postgres |
+| Background sweeper with `pg_try_advisory_lock` (seat-svc) | Lazy expiry only; cron container; Redis ZSET | Seats free up on a clock, not on the next write; the advisory lock makes the sweep single-flight across scaled instances; lazy expiry stays as backstop | Redis ZSET + keyspace notifications; emit per-seat metrics |
+| SSE (`/api/seats/stream`) with in-process fan-out at the gateway + polling fallback | WebSockets; polling only | One-way availability push fits SSE exactly (auto-reconnect for free, plain HTTP through nginx); polling fallback keeps the UI correct if the stream drops | Redis pub/sub (`srp:seat_changes`) so fan-out works across multiple gateway pods (until then: sticky sessions, see nginx.conf) |
+| Redis seat cache (10s TTL, invalidated on every mutation) + read/write pool split | Always hit primary | Seat list is the hottest read; cache + replica-ready `readPool` keep the primary for race-critical writes; both degrade to no-op/primary when unset — zero regression | Read-your-writes guards per user; cache stampede protection (single-flight) |
 | Two-step mock payment (intent → checkout URL → confirm callback) with `?outcome=` | Single synchronous endpoint; Stripe test mode | Mirrors a real redirect/callback flow and deterministically exercises success / fail / timeout without external deps | Real provider webhook + idempotency keys + signature verification |
-| Basic rate limit on auth only | Rate limit everything; none | Highest-value target (credential stuffing) within time budget | Distributed rate limiting (Redis), per-IP + per-account limits, lockout |
-| Vite/React SPA, plain CSS, React Router, native fetch + 3s polling | Next.js, Tailwind, TanStack Query | Few deps, fast to build, clearly demonstrates the flow; polling keeps seat availability + hold countdown live | Realtime via WebSocket/SSE, optimistic UI, component/e2e tests |
+| Layered rate limiting: nginx per-IP zones + gateway express-rate-limit on auth | Rate limit everything; none | Credential endpoints are the highest-value target; two independent layers (edge + app) survive either being bypassed | Redis-backed shared counters (limits currently reset per instance/restart), per-account limits, lockout |
+| Vite/React SPA, plain CSS, React Router, native fetch, SSE + polling fallback | Next.js, Tailwind, TanStack Query, WebSockets | Few deps, fast to build, clearly demonstrates the flow; SSE pushes availability live, polling guards drift/disconnects | Optimistic UI, component/e2e tests |
 | Single seats page: multi-select (≤2) → Hold → inline "Pay all" section | Per-seat checkout pages; per-seat payment outcomes | Matches the booking mental model (pick basket, then pay) and keeps the whole flow on one screen | Per-seat outcome control, cart persistence, seat map layout |
 
 ## 5. Concurrency model
@@ -95,6 +125,18 @@ via `DELETE /api/reservations/:id` (→ `CANCELLED`).
   replayable) and **rotated atomically** on each use — the revoke-old +
   issue-new happens in one transaction with a `revokedAt IS NULL` CAS guard,
   so two concurrent refreshes with the same token can never both win.
+- **Access-token revocation (`tokenVersion`):** every access JWT embeds the
+  user's `tokenVersion` (`ver` claim); `requireAuth` compares it against the
+  User row, and logout / refresh-token reuse **increments** it — so a stolen
+  access token dies immediately instead of staying valid until its 15m expiry.
+  (TODO(prod): cache the version in Redis ~30s to avoid the per-request read.)
+- **Timing-safe login:** when the email is unknown, login still runs bcrypt
+  against a precomputed dummy hash — the unknown-email and wrong-password
+  paths cost the same ~200ms, closing the user-enumeration timing oracle.
+- **Service-to-service trust:** internal services only accept a user identity
+  (`X-User-Id`) when the request carries the shared `X-Internal-Secret`; the
+  gateway strips both headers from inbound client traffic so they can't be
+  spoofed.
 - **Reuse detection:** presenting an already-rotated/revoked refresh token is
   treated as theft — every active session for that user is revoked. (No grace
   window for lost-response retries; the cost is a forced re-login.)
@@ -102,10 +144,10 @@ via `DELETE /api/reservations/:id` (→ `CANCELLED`).
   cookie — a stolen copy of the token dies too.
 - **Passwords:** bcrypt cost 12 (~150–250ms per hash — deliberate; it
   CPU-rate-limits login attempts); never logged or returned.
-- **Rate limiting:** applied to login/auth endpoints to blunt credential
-  stuffing/brute force. Broader rate limiting is **deferred — because** the 2h
-  budget prioritizes the booking-correctness core; in production this would be
-  Redis-backed and applied to all mutating routes.
+- **Rate limiting:** two layers — nginx per-IP zones (auth 10r/m, api 300r/m)
+  at the edge, plus express-rate-limit on the credential endpoints in the
+  gateway. Both are per-instance in-memory; production would back them with
+  Redis so limits hold across replicas and restarts.
 
 ## 7. What's intentionally missing
 
@@ -115,8 +157,13 @@ via `DELETE /api/reservations/:id` (→ `CANCELLED`).
   CONFIRMED no-op on confirm); with a real PSP the **webhook** would be the
   source of truth, deduped on `payment_intent_id` (see `TODO(prod)` in
   `payments.ts`).
-- **No background job** to expire holds — expiry is **lazy** (computed on read /
-  on next hold attempt) instead of a scheduled sweeper.
+- **One shared Postgres database** across services — each service owns its
+  tables logically, but there is no physical isolation; a dedicated DB (or at
+  least schema) per service is the production follow-up, together with async
+  messaging (e.g. Kafka) instead of the current synchronous HTTP hops.
+- **SSE fan-out is in-process** at the gateway — scaling the gateway past one
+  pod needs either sticky sessions (stubbed in `nginx.conf`) or the
+  `TODO(prod)` Redis pub/sub channel.
 - **Per-user reservation limit is best-effort** — enforced via a count inside the
   hold transaction, not a lock; under extreme concurrency a user could briefly
   exceed it. The *seat* double-booking guarantee is the hard, DB-enforced one.
@@ -126,8 +173,8 @@ via `DELETE /api/reservations/:id` (→ `CANCELLED`).
   again. Acceptable trade-off here; production would allow a short (~10s)
   window keyed on the replaced token.
 - **No CSRF double-submit token** — relying on `SameSite=Strict` for this scope.
-- **No realtime seat updates** (websockets/SSE) — client refetches availability.
-- **No CSP / Helmet hardening, no audit logging, no observability/metrics.**
+- **No CSP / Helmet hardening, no audit logging, no observability/metrics**
+  (nginx adds `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`).
 - **Limited automated test coverage** — `npm test` runs Vitest integration tests
   for the concurrency race, key failure paths (payment fail/timeout, expired
   hold, cancel, hold limit), and the auth session lifecycle (refresh-after-logout,

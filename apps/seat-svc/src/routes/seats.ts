@@ -37,13 +37,16 @@ seatsRouter.get(
     let rows = await getCachedSeats<SeatRow>();
     if (!rows) {
       // At most one HELD/CONFIRMED row per seat (partial unique index).
+      // Prisma stores DateTime as `timestamp` (no tz) holding UTC wall time;
+      // node-postgres would parse that as LOCAL time. AT TIME ZONE 'UTC'
+      // converts it to timestamptz so the driver yields the correct instant.
       const result = await readPool.query<SeatRow>(
         `SELECT s.id,
                 s.label,
-                r.id              AS reservation_id,
-                r.status::text    AS reservation_status,
-                r."userId"        AS reservation_user_id,
-                r."holdExpiresAt" AS hold_expires_at
+                r.id           AS reservation_id,
+                r.status::text AS reservation_status,
+                r."userId"     AS reservation_user_id,
+                r."holdExpiresAt" AT TIME ZONE 'UTC' AS hold_expires_at
            FROM "Seat" s
            LEFT JOIN "Reservation" r
              ON r."seatId" = s.id
