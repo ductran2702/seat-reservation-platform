@@ -1,5 +1,11 @@
 import express, { type Express } from "express";
-import { INTERNAL_SECRET_HEADER, errorHandler, notFound } from "@srp/linkz-core";
+import { prisma } from "@srp/db";
+import {
+  INTERNAL_SECRET_HEADER,
+  asyncHandler,
+  errorHandler,
+  notFound,
+} from "@srp/linkz-core";
 import { env } from "./env.js";
 import { publishSeatChange } from "./events.js";
 import { reservationsRouter } from "./routes/reservations.js";
@@ -10,9 +16,20 @@ export function createApp(): Express {
   app.set("trust proxy", 1);
   app.use(express.json());
 
+  // Liveness: process is up.
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", service: "seat-svc" });
   });
+
+  // Readiness: dependencies reachable — orchestrators must not route traffic
+  // here before the DB connection works (throws → 500 → probe fails).
+  app.get(
+    "/api/ready",
+    asyncHandler(async (_req, res) => {
+      await prisma.$queryRaw`SELECT 1`;
+      res.json({ status: "ready", service: "seat-svc" });
+    }),
+  );
 
   // Internal: payment-svc reports the seat-state mutations it performed
   // (confirm → CONFIRMED, fail → released) so cache invalidation and SSE

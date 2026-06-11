@@ -49,6 +49,12 @@ make up           # alternatively: the full dockerized stack behind nginx :80
   accessed via Prisma, plus raw `pg` pools with a read/write split
   (`packages/db`). One shared database in this skeleton — each service owns
   its tables logically; the physical split (DB per service) is deferred.
+- **Ops:** every service exposes `/api/health` (liveness) and `/api/ready`
+  (DB-ping readiness, wired into compose healthchecks), drains in-flight
+  requests on SIGTERM/SIGINT (10s force-exit; background timers stopped, pools
+  disconnected), validates env vars at startup (presence + positive-integer),
+  and logs structured JSON with an `action` field (`payment_success`,
+  `payment_failure`, `unhandled_error`, `outbox_event_dead`, …).
 - **Auth:** short-lived access JWT + long-lived (90d) **opaque** refresh token
   (48 random bytes — deliberately *not* a JWT, so the DB record is the single
   source of truth and the session is always revocable), both in httpOnly +
@@ -85,6 +91,7 @@ React ──▶ nginx :80 ──▶ gateway :3000 ──▶ auth-svc :3001 / sea
 | SSE (`/api/seats/stream`) with in-process fan-out at the gateway + polling fallback | WebSockets; polling only | One-way availability push fits SSE exactly (auto-reconnect for free, plain HTTP through nginx); polling fallback keeps the UI correct if the stream drops | Redis pub/sub (`srp:seat_changes`) so fan-out works across multiple gateway pods (until then: sticky sessions, see nginx.conf) |
 | Redis seat cache (10s TTL, invalidated on every mutation) + read/write pool split | Always hit primary | Seat list is the hottest read; cache + replica-ready `readPool` keep the primary for race-critical writes; both degrade to no-op/primary when unset — zero regression | Read-your-writes guards per user; cache stampede protection (single-flight) |
 | Two-step mock payment (intent → checkout URL → confirm callback) with `?outcome=` | Single synchronous endpoint; Stripe test mode | Mirrors a real redirect/callback flow and deterministically exercises success / fail / timeout without external deps | Real provider webhook + idempotency keys + signature verification |
+| Payment events: **Pattern B** — transactional outbox + DB poll worker | Pattern A (internet-facing webhook, HMAC `timingSafeEqual` + outbox); fire-and-forget HTTP | Mock provider has no real webhook to verify, so an internal event flow is the honest fit. Outbox row commits in the **same TX** as the payment/reservation flip (crash can't confirm without enqueueing); worker acks **only after** successful delivery (at-least-once; consumer idempotent); bounded retries → DEAD letter so a poison event never blocks the queue. Trade-off: DB polling adds ~1s latency and load vs a broker. Switching to a real PSP (Stripe) means Pattern A: HMAC-verified webhook as source of truth, deduped on `payment_intent_id`, same outbox underneath | Kafka/RabbitMQ consumer instead of the poll loop; `SELECT … FOR UPDATE SKIP LOCKED` claiming; refunds as compensating events; DEAD-letter alerting |
 | Layered rate limiting: nginx per-IP zones + gateway express-rate-limit on auth | Rate limit everything; none | Credential endpoints are the highest-value target; two independent layers (edge + app) survive either being bypassed | Redis-backed shared counters (limits currently reset per instance/restart), per-account limits, lockout |
 | Vite/React SPA, plain CSS, React Router, native fetch, SSE + polling fallback | Next.js, Tailwind, TanStack Query, WebSockets | Few deps, fast to build, clearly demonstrates the flow; SSE pushes availability live, polling guards drift/disconnects | Optimistic UI, component/e2e tests |
 | Single seats page: multi-select (≤2) → Hold → inline "Pay all" section | Per-seat checkout pages; per-seat payment outcomes | Matches the booking mental model (pick basket, then pay) and keeps the whole flow on one screen | Per-seat outcome control, cart persistence, seat map layout |
@@ -173,8 +180,11 @@ via `DELETE /api/reservations/:id` (→ `CANCELLED`).
   again. Acceptable trade-off here; production would allow a short (~10s)
   window keyed on the replaced token.
 - **No CSRF double-submit token** — relying on `SameSite=Strict` for this scope.
-- **No CSP / Helmet hardening, no audit logging, no observability/metrics**
-  (nginx adds `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`).
+- **No CSP / Helmet hardening, no audit logging** (nginx adds
+  `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`).
+- **Observability is logs-only** — structured JSON with `action` fields
+  (payment success/failure, dead outbox events, unhandled errors) that an
+  aggregator can alert on; no metrics endpoint, tracing, or dashboards.
 - **Limited automated test coverage** — `npm test` runs Vitest integration tests
   for the concurrency race, key failure paths (payment fail/timeout, expired
   hold, cancel, hold limit), and the auth session lifecycle (refresh-after-logout,

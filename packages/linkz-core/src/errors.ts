@@ -27,7 +27,7 @@ export function notFound(_req: Request, res: Response): void {
 
 export function errorHandler(
   err: unknown,
-  _req: Request,
+  req: Request,
   res: Response,
   _next: NextFunction,
 ): void {
@@ -39,6 +39,16 @@ export function errorHandler(
     res.status(400).json({ error: "validation_error", details: err.flatten() });
     return;
   }
-  console.error(err);
+  // Structured JSON (not a raw stack dump) so a log aggregator can parse,
+  // group, and alert on the `action` field.
+  console.error(
+    JSON.stringify({
+      action: "unhandled_error",
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+      path: req.path,
+      method: req.method,
+    }),
+  );
   res.status(500).json({ error: "internal_error" });
 }

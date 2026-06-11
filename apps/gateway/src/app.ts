@@ -83,8 +83,21 @@ export function createApp(overrides: Partial<GatewayConfig> = {}): Express {
   app.use(cookieParser());
   app.use(createAttachUser(config));
 
+  // Liveness: process is up.
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", service: "gateway" });
+  });
+
+  // Readiness: the gateway needs the DB for tokenVersion checks. (Service
+  // reachability is intentionally not probed here — a down service should
+  // 502 its own routes, not take the whole edge out of rotation.)
+  app.get("/api/ready", (_req, res) => {
+    readPool
+      .query("SELECT 1")
+      .then(() => res.json({ status: "ready", service: "gateway" }))
+      .catch(() =>
+        res.status(503).json({ status: "unavailable", service: "gateway" }),
+      );
   });
 
   // Public client config (e.g. seat price for the payment summary).

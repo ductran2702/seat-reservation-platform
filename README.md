@@ -49,8 +49,10 @@ Redis caching, an SSE stream for live seat availability, and an nginx edge.
 - **seat-svc** — write authority for seat state: holds/reservations, the
   partial-unique-index invariant, the background hold-expiry **sweeper**
   (Postgres advisory lock), and the Redis seat cache.
-- **payment-svc** — mock two-step payment; reports seat-state changes back to
-  seat-svc so cache invalidation + SSE fan-out stay centralized.
+- **payment-svc** — mock two-step payment with a **transactional outbox**
+  (Pattern B): seat-state events commit in the same transaction as the payment
+  flip and a poll worker delivers them to seat-svc at-least-once (bounded
+  retries → DEAD letter).
 - **packages/linkz-core** — shared middleware (internal-header auth, cookie
   JWT verification, error handling).
 - **packages/db** — shared Prisma schema + raw `pg` pools with a read/write
@@ -233,6 +235,9 @@ See `DECISIONS.md` §8 for the full list. Quick checks in the UI:
 - **Scaling skeleton:** SSE seat stream with gateway fan-out, background
   hold-expiry sweeper guarded by a Postgres advisory lock, Redis seat cache
   with invalidation on every mutation.
+- **Ops:** `/api/health` (liveness) + `/api/ready` (DB-ping readiness, used by
+  compose healthchecks) on every service; SIGTERM-graceful shutdown with
+  request draining; env validation at startup; structured JSON logs.
 - **Web:** Vite + React; dev proxy keeps cookies first-party for
   `SameSite=Strict`.
 - **Payment:** Two-step mock provider (`/intent` → `/confirm?outcome=`) invoked

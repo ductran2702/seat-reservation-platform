@@ -1,17 +1,40 @@
-import { directPool } from "@srp/db";
+import { directPool, prisma } from "@srp/db";
 import { createApp } from "./app.js";
 import { env } from "./env.js";
-import { scheduleExistingHolds } from "./expiryScheduler.js";
 import { startSweeper } from "./sweeper.js";
 
 const app = createApp();
 
-app.listen(env.port, () => {
-  console.log(`seat-svc listening on http://localhost:${env.port}`);
+const server = app.listen(env.port, () => {
+  console.log(
+    JSON.stringify({
+      action: "server_started",
+      service: "seat-svc",
+      port: env.port,
+      nodeEnv: env.nodeEnv,
+    }),
+  );
 });
 
 // Advisory-locked background job — needs a direct (non-PgBouncer) connection.
-startSweeper(directPool);
+const sweeper = startSweeper(directPool);
 
-// Re-arm precise per-hold expiry timers for holds created before this boot.
-void scheduleExistingHolds();
+// Graceful shutdown: stop the sweeper, stop accepting connections, drain
+// in-flight requests (no Prisma TX killed mid-flight), then disconnect.
+// Force-exit after 10s if requests don't drain.
+function shutdown(signal: string): void {
+  console.log(
+    JSON.stringify({ action: "shutdown_started", service: "seat-svc", signal }),
+  );
+  clearInterval(sweeper);
+  server.close(() => {
+    Promise.allSettled([prisma.$disconnect(), directPool.end()]).finally(() =>
+      process.exit(0),
+    );
+  });
+  server.closeIdleConnections();
+  setTimeout(() => process.exit(1), 10_000).unref();
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
